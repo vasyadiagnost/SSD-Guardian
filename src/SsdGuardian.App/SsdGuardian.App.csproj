@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>SSDGuardian</AssemblyName>
+    <RootNamespace>SsdGuardian.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.1.2</Version>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="9" />
+    <ProjectReference Include="..\SsdGuardian.Core\SsdGuardian.Core.csproj" />
+    <ProjectReference Include="..\SsdGuardian.Windows\SsdGuardian.Windows.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SsdGuardian.App/SsdGuardian.App.csproj" />
+    <Project Path="src/SsdGuardian.Core/SsdGuardian.Core.csproj" />
+    <Project Path="src/SsdGuardian.Windows/SsdGuardian.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SsdGuardian.Tests/SsdGuardian.Tests.csproj" />
+    <Project Path="tests/SsdGuardian.Windows.Tests/SsdGuardian.Windows.Tests.csproj" />
+  </Folder>
+</Solution>
