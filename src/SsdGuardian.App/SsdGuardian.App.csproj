@@ -8,7 +8,7 @@
     <AssemblyName>SSDGuardian</AssemblyName>
     <RootNamespace>SsdGuardian.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>

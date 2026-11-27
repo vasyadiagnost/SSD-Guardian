@@ -5,6 +5,8 @@ if (args is ["--live"])
     return await LiveChecks.Run();
 if (args is ["--network-probe"])
     return await LiveChecks.SendLoopbackTraffic();
+if (args is ["--file-probe", var path])
+    return LiveChecks.RunFileProbe(path);
 
 var created = new DateTimeOffset(2026, 11, 25, 12, 0, 0, TimeSpan.Zero);
 const int guardianPid = 400;
@@ -58,7 +60,7 @@ var tests = new (string Name, Action Run)[]
         Require(Denied(target, null, false, false, thirdParty), "unverified identity allowed");
         Require(!Denied(target, created, false, false, thirdParty), "eligible target rejected");
     })
-}.Concat(RecoveryChecks.Scenarios).ToArray();
+}.Concat(RecoveryChecks.Scenarios).Concat(ProcessLifecycleChecks.Scenarios).ToArray();
 
 var failed = 0;
 foreach (var (name, run) in tests)

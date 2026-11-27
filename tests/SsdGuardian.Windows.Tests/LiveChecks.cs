@@ -52,10 +52,12 @@ internal static class LiveChecks
                 await CheckWrite(engine, afterFile, statuses);
                 Console.WriteLine("PASS ETW reconnects after an interruption and counts new writes with a coverage warning");
 
+                await CheckNaturalExit(engine, Path.Combine(directory, "child.bin"), statuses);
+
                 var childPid = await RunNetworkProcess();
                 await Task.Delay(TimeSpan.FromSeconds(2));
                 var snapshot = engine.Snapshot(DateTimeOffset.UtcNow);
-                if (snapshot.Processes.Any(row => row.Process.Identity.Pid == childPid && row.Logical.Session.Bytes != 0))
+                if (snapshot.SessionLedger.Processes.Any(row => row.Process.Identity.Pid == childPid && row.Logical.Session.Bytes != 0))
                     throw new InvalidOperationException("Loopback-only network probe was attributed to an SSD.");
                 Console.WriteLine($"PASS {DatagramBytes * DatagramCount:N0} loopback UDP bytes generated no attributed SSD writes");
                 Console.WriteLine($"Observed physical SSD traffic including background activity: {snapshot.SessionPhysical.Bytes:N0} bytes");
@@ -77,6 +79,7 @@ internal static class LiveChecks
         {
             File.Delete(Path.Combine(directory, "before.bin"));
             File.Delete(Path.Combine(directory, "after.bin"));
+            File.Delete(Path.Combine(directory, "child.bin"));
             Directory.Delete(directory);
         }
     }
@@ -96,6 +99,14 @@ internal static class LiveChecks
                 return 1;
         }
 
+        return 0;
+    }
+
+    internal static int RunFileProbe(string path)
+    {
+        WriteFile(path);
+        // Keep the instance alive until the ETW consumer observes its writes.
+        Console.ReadLine();
         return 0;
     }
 
@@ -120,14 +131,65 @@ internal static class LiveChecks
             $"known write in {Path.GetFileName(path)} on a recognized SSD", statuses);
     }
 
-    private static async Task<int> RunNetworkProcess()
+    private static async Task CheckNaturalExit(MonitorEngine engine, string path, ConcurrentQueue<MonitorStatus> statuses)
+    {
+        var start = ChildStart("--file-probe");
+        start.ArgumentList.Add(path);
+        start.RedirectStandardInput = true;
+        using var child = Process.Start(start) ?? throw new InvalidOperationException("Could not start file probe.");
+        var identity = new ProcessIdentity(child.Id, new DateTimeOffset(child.StartTime.ToUniversalTime()));
+        try
+        {
+            await WaitFor(() => engine.Snapshot(DateTimeOffset.UtcNow).Processes
+                    .Where(row => row.Process.Identity == identity)
+                    .SelectMany(row => row.Files)
+                    .Any(file => string.Equals(file.Path, path, StringComparison.OrdinalIgnoreCase) &&
+                        file.Logical.Session == new WriteTotals(ChunkBytes * ChunkCount, ChunkCount)),
+                "file probe writes before exit", statuses);
+        }
+        finally
+        {
+            child.StandardInput.Close();
+        }
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await child.WaitForExitAsync(timeout.Token);
+        if (child.ExitCode != 0)
+            throw new InvalidOperationException("The file probe failed.");
+
+        await WaitFor(() => engine.Snapshot(DateTimeOffset.UtcNow).SessionLedger.Processes
+                .Any(row => row.Process.Identity == identity && row.ExitTime is not null &&
+                    row.Logical.Session == new WriteTotals(ChunkBytes * ChunkCount, ChunkCount)),
+            "confirmed exit with preserved session totals", statuses);
+
+        var ledger = engine.Snapshot(DateTimeOffset.UtcNow).SessionLedger;
+        WriteTotals[] buckets = [ledger.ActiveLogical, ledger.ExitedLogical, ledger.OtherLogical, ledger.UnidentifiedLogical];
+        if (ledger.KnownLogical != new WriteTotals(buckets.Sum(item => item.Bytes), buckets.Sum(item => item.Operations)))
+            throw new InvalidOperationException("Live logical session totals did not balance.");
+
+        var childPath = ledger.Processes.First(row => row.Process.Identity == identity).Process.Path;
+        var program = ledger.Programs.SingleOrDefault(item => string.Equals(item.Path, childPath, StringComparison.OrdinalIgnoreCase));
+        if (program is null || program.Instances < 2 || program.ExitedInstances < 1)
+            throw new InvalidOperationException("Run counts did not combine the parent and exited child under their executable.");
+
+        Console.WriteLine("PASS Native exit marked the child, retained 4 MiB/16 writes and preserved the logical balance");
+        Console.WriteLine("PASS Executable summary includes distinct current and exited instances");
+    }
+
+    private static ProcessStartInfo ChildStart(string mode)
     {
         var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Test executable path unavailable.");
         var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true };
         if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
             start.ArgumentList.Add(typeof(LiveChecks).Assembly.Location);
-        start.ArgumentList.Add("--network-probe");
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start network probe.");
+        start.ArgumentList.Add(mode);
+        return start;
+    }
+
+    private static async Task<int> RunNetworkProcess()
+    {
+        using var process = Process.Start(ChildStart("--network-probe")) ??
+            throw new InvalidOperationException("Could not start network probe.");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         await process.WaitForExitAsync(timeout.Token);
         if (process.ExitCode != 0)

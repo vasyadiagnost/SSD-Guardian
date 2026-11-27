@@ -1,4 +1,4 @@
-# SSD Guardian v0.1.2
+# SSD Guardian v0.1.3
 
 [Руководство на русском](README.ru.md)
 
@@ -6,7 +6,7 @@ SSD Guardian is a portable Windows 11 x64 utility that monitors physical writes 
 
 ## Start SSD Guardian
 
-1. Extract `SSD-Guardian-v0.1.2-win-x64.zip` to a new folder and run `SSDGuardian.exe` inside `SSD Guardian`. The archive includes the .NET runtime.
+1. Extract `SSD-Guardian-v0.1.3-win-x64.zip` to a new folder and run `SSDGuardian.exe` inside `SSD Guardian`. The archive includes the .NET runtime.
 2. Select **Run as administrator** and approve the Windows UAC prompt to enable ETW monitoring.
 3. Close the main window or minimize it to the tray to keep monitoring. Select **Exit** from the tray menu to stop monitoring.
 
@@ -16,7 +16,9 @@ Settings, anomaly history, and diagnostics live in `%LOCALAPPDATA%\SSD Guardian`
 
 ## Read the counters
 
-Physical counters are per SSD. Logical counters show file requests by process identity and file on a known SSD volume. Both include byte and operation counts across 10, 30, and 60 minutes and the current session.
+Physical counters are per SSD. Logical counters show file requests by process and file on a known SSD volume. Use the logical session total to reconcile the process table. The total splits into process instances whose exit has not been confirmed, confirmed exits, other accounted writes, and writes without a confirmed process. File events without a confirmed SSD mapping are reported separately.
+
+Each retained process instance keeps its session bytes and operations when recent-window or file details fall out of the tracking set. An exit marker appears when the process exit can be verified. The executable summary groups retained rows by verified full path and counts distinct process instances. Session summaries live in memory and start fresh when SSD Guardian restarts.
 
 Click any process column header to cycle through descending, ascending, and the default ordering by recent logical writes. An arrow marks the selected column and direction.
 
@@ -34,4 +36,4 @@ On an elevated test machine, run `dotnet run --project tests/SsdGuardian.Windows
 
 ## License
 
-SSD Guardian is licensed under the [MIT License](LICENSE). Bundled third-party components retain their respective licenses and notices.
+SSD Guardian uses the [MIT License](LICENSE). Dependency notices are included in the portable ZIP.

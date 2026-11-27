@@ -5,7 +5,6 @@ using System.Threading.Channels;
 using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
-using Microsoft.Win32.SafeHandles;
 using SsdGuardian.Core;
 
 namespace SsdGuardian.Windows;
@@ -125,7 +124,8 @@ public sealed class DiskWriteMonitor : IDisposable
 
             try
             {
-                EtwRetry.Run(() => RunSession(cancellation), ReportRetry, cancellation.WaitHandle.WaitOne, cancellation);
+                using var processes = new ProcessCache(engine);
+                EtwRetry.Run(() => RunSession(processes, cancellation), ReportRetry, cancellation.WaitHandle.WaitOne, cancellation);
             }
             finally
             {
@@ -155,7 +155,7 @@ public sealed class DiskWriteMonitor : IDisposable
         catch (AbandonedMutexException) { return true; }
     }
 
-    private void RunSession(CancellationToken cancellation)
+    private void RunSession(ProcessCache processes, CancellationToken cancellation)
     {
         RefreshInventory();
         OwnedEtwSession active;
@@ -183,7 +183,7 @@ public sealed class DiskWriteMonitor : IDisposable
                 // Defer drive mapping until a write actually references the name.
                 KernelPathToUserPathMapper = static path => path
             };
-            using var correlation = new TraceCorrelation(this, parser, samples.Writer);
+            var correlation = new TraceCorrelation(this, parser, samples.Writer, processes);
             if (wasConnected)
                 ReportObservationGap();
             wasConnected = true;
@@ -299,6 +299,7 @@ public sealed class DiskWriteMonitor : IDisposable
                 lossQueryFailed = false;
                 if (++checks == 12)
                 {
+                    correlation.SweepProcesses(DateTimeOffset.UtcNow);
                     bool hadSsd = Disks.Any(disk => disk.IsSsd);
                     RefreshInventory();
                     if (hadSsd != Disks.Any(disk => disk.IsSsd))
@@ -343,24 +344,25 @@ public sealed class DiskWriteMonitor : IDisposable
 
     private readonly record struct SampleRequest(int Disk, string Path, int StorageVersion);
 
-    private sealed class TraceCorrelation : IDisposable
+    private sealed class TraceCorrelation
     {
         private readonly DiskWriteMonitor monitor;
         private readonly ChannelWriter<SampleRequest> samples;
+        private readonly ProcessCache processes;
         private readonly BoundedMap<ulong, NamedFile> keys = new(8192);
         private readonly BoundedMap<ulong, NamedFile> objects = new(4096);
         private readonly BoundedMap<int, ThreadOwner> threads = new(8192);
-        private readonly BoundedMap<int, ProcessLookup> processes = new(1024, lookup => lookup.Handle?.Dispose());
         private readonly BoundedMap<ulong, PendingWrite> writes = new(8192);
         private readonly BoundedMap<(int Disk, string Path), DateTimeOffset> sampled = new(1024);
         private long overflowCount;
         private int epoch;
-        private DateTimeOffset lastProcessCacheSweep;
 
-        public TraceCorrelation(DiskWriteMonitor monitor, KernelTraceEventParser parser, ChannelWriter<SampleRequest> samples)
+        public TraceCorrelation(DiskWriteMonitor monitor, KernelTraceEventParser parser, ChannelWriter<SampleRequest> samples,
+            ProcessCache processes)
         {
             this.monitor = monitor;
             this.samples = samples;
+            this.processes = processes;
             parser.DiskIOWrite += OnDiskWrite;
             parser.FileIOName += OnFileName;
             parser.FileIOFileCreate += OnFileName;
@@ -370,15 +372,15 @@ public sealed class DiskWriteMonitor : IDisposable
             parser.FileIOClose += data => objects.TryRemove(data.FileObject, out _);
             parser.FileIOWrite += OnFileWrite;
             parser.FileIOOperationEnd += OnFileOperationEnd;
-            parser.ProcessStart += OnProcessStart;
-            parser.ProcessStop += OnProcessStop;
+            parser.ProcessStart += data => processes.OnStart(data.ProcessID);
+            parser.ProcessStop += data => processes.OnStop(data.ProcessID, data.TimeStamp);
             parser.ThreadStartGroup += OnThreadStart;
             parser.ThreadStop += OnThreadStop;
         }
 
         public long OverflowCount => Interlocked.Read(ref overflowCount);
 
-        public void Dispose() => processes.Clear();
+        public void SweepProcesses(DateTimeOffset now) => processes.Sweep(now);
 
         private void OnDiskWrite(DiskIOTraceData data)
         {
@@ -409,19 +411,6 @@ public sealed class DiskWriteMonitor : IDisposable
                 threads.TryRemove(data.ThreadID, out _);
         }
 
-        private void OnProcessStart(ProcessTraceData data)
-        {
-            CheckLossEpoch();
-            if (data.ProcessID > 0)
-                ForgetProcess(data.ProcessID);
-        }
-
-        private void OnProcessStop(ProcessTraceData data)
-        {
-            if (processes.TryGetValue(data.ProcessID, out var known) && known.LookupTime <= data.TimeStamp)
-                ForgetProcess(data.ProcessID);
-        }
-
         private void OnFileWrite(FileIOReadWriteTraceData data)
         {
             CheckLossEpoch();
@@ -440,7 +429,7 @@ public sealed class DiskWriteMonitor : IDisposable
             int pid = data.ProcessID;
             if (pid <= 0 && threads.TryGetValue(data.ThreadID, out var owner) && owner.Timestamp <= timestamp)
                 pid = owner.Pid;
-            var process = FindProcess(pid, timestamp);
+            var process = processes.Find(pid, timestamp);
 
             // A pointer can be reused. If an earlier start remains unmatched, omit both candidates.
             if (writes.TryGetValue(data.IrpPtr, out _))
@@ -480,48 +469,15 @@ public sealed class DiskWriteMonitor : IDisposable
 
             var storage = Volatile.Read(ref monitor.inventory);
             int? mappedDisk = storage?.Version == pending.StorageVersion ? pending.Disk : null;
-            monitor.engine.RecordFileWrite(new(timestamp, mappedDisk, pending.Process, pending.Path,
+            monitor.engine.RecordFileWrite(new(timestamp, mappedDisk, pending.Process?.Info, pending.Path,
                 (long)data.ExtraInfo, pending.Offset));
+            if (pending.Process is { ExitedAt: { } exitedAt } process)
+                monitor.engine.MarkProcessExited(process.Info.Identity, exitedAt);
             if (mappedDisk is int disk && pending.Path is { } path && storage?.IsSsd(disk) == true &&
                 (!sampled.TryGetValue((disk, path), out var last) ||
                     timestamp - last >= TimeSpan.FromSeconds(monitor.engine.FileSizeSampleIntervalSeconds)) &&
                 samples.TryWrite(new(disk, path, pending.StorageVersion)))
                 sampled.Set((disk, path), timestamp);
-        }
-
-        private ProcessInfo? FindProcess(int pid, DateTimeOffset timestamp)
-        {
-            if (pid <= 0)
-                return null;
-
-            if (timestamp - lastProcessCacheSweep >= TimeSpan.FromMinutes(1))
-            {
-                processes.Clear();
-                lastProcessCacheSweep = timestamp;
-            }
-            if (processes.TryGetValue(pid, out var cached) && timestamp - cached.LookupTime < TimeSpan.FromSeconds(30))
-                return cached.Process is { } previous && previous.Identity.CreatedAt <= timestamp ? previous : null;
-
-            var handle = NativeMethods.OpenProcess(NativeMethods.ProcessQueryLimitedInformation, false, pid);
-            if (handle.IsInvalid || !NativeMethods.TryReadRunningCreation(handle, out DateTimeOffset creation) || creation > timestamp)
-            {
-                handle.Dispose();
-                processes.Set(pid, new(timestamp, null, null));
-                return null;
-            }
-
-            string? path = NativeMethods.ReadImagePath(handle);
-            string name = path is null ? $"PID {pid}" : Path.GetFileName(path);
-            var process = new ProcessInfo(new(pid, creation), name, path);
-            // Maintaining a bounded query handle pins the PID while metadata is cached.
-            processes.Set(pid, new(timestamp, process, handle));
-            return process;
-        }
-
-        private void ForgetProcess(int pid)
-        {
-            if (processes.TryRemove(pid, out var removed))
-                removed.Handle?.Dispose();
         }
 
         private void CheckLossEpoch()
@@ -533,7 +489,6 @@ public sealed class DiskWriteMonitor : IDisposable
             keys.Clear();
             objects.Clear();
             threads.Clear();
-            processes.Clear();
             writes.Clear();
             epoch = currentEpoch;
         }
@@ -541,8 +496,7 @@ public sealed class DiskWriteMonitor : IDisposable
         private readonly record struct NamedFile(DateTimeOffset Timestamp, string Path,
             int StorageVersion = 0, StorageInventory.MappedFile Location = default);
         private readonly record struct ThreadOwner(DateTimeOffset Timestamp, int Pid);
-        private readonly record struct ProcessLookup(DateTimeOffset LookupTime, ProcessInfo? Process, SafeProcessHandle? Handle);
-        private readonly record struct PendingWrite(DateTimeOffset Timestamp, int? Disk, ProcessInfo? Process,
+        private readonly record struct PendingWrite(DateTimeOffset Timestamp, int? Disk, ProcessCache.ProcessLifetime? Process,
             string? Path, int RequestSize, long? Offset, int StorageVersion);
     }
 }

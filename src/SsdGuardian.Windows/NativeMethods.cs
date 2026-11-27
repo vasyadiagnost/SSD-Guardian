@@ -8,10 +8,14 @@ internal static class NativeMethods
 {
     internal const uint ProcessTerminate = 0x0001;
     internal const uint ProcessQueryLimitedInformation = 0x1000;
+    internal const uint Synchronize = 0x0010_0000;
     internal const int ProcessProtectionLevelInfo = 7;
     internal const uint ProtectionLevelNone = 0xFFFF_FFFE;
     internal const uint IoctlStorageQueryProperty = 0x002D_1400;
     internal const uint IoctlVolumeGetVolumeDiskExtents = 0x0056_0000;
+    private const uint StillActive = 259;
+    private const uint WaitObject0 = 0;
+    private const uint WaitTimeout = 258;
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     internal static extern SafeFileHandle CreateFile(string name, uint access, uint share,
@@ -59,6 +63,9 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetExitCodeProcess(SafeProcessHandle process, out uint exitCode);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool QueryFullProcessImageName(SafeProcessHandle process, int flags,
@@ -92,11 +99,11 @@ internal static class NativeMethods
             ? new DateTimeOffset(DateTime.FromFileTimeUtc(creation))
             : null;
 
-    internal static bool TryReadRunningCreation(SafeProcessHandle process, out DateTimeOffset creation)
+    internal static bool TryReadRunningCreation(SafeProcessHandle process, bool canWait, out DateTimeOffset creation)
     {
-        const uint stillActive = 259;
-        if (GetExitCodeProcess(process, out uint exitCode) && exitCode == stillActive &&
-            ReadCreationTime(process) is { } started)
+        bool running = canWait ? WaitForSingleObject(process, 0) == WaitTimeout :
+            GetExitCodeProcess(process, out uint exitCode) && exitCode == StillActive;
+        if (running && ReadCreationTime(process) is { } started)
         {
             creation = started;
             return true;
@@ -104,6 +111,17 @@ internal static class NativeMethods
 
         creation = default;
         return false;
+    }
+
+    internal static DateTimeOffset? ReadExitTime(SafeProcessHandle process, bool canWait, DateTimeOffset expectedCreation)
+    {
+        // Exit time is undefined until the process exits. Waiting also handles an exit code of 259.
+        bool exited = canWait ? WaitForSingleObject(process, 0) == WaitObject0 :
+            GetExitCodeProcess(process, out uint exitCode) && exitCode != StillActive;
+        return exited && GetProcessTimes(process, out long creation, out long exit, out _, out _) &&
+            creation > 0 && creation == expectedCreation.ToFileTime() && exit >= creation
+                ? new DateTimeOffset(DateTime.FromFileTimeUtc(exit))
+                : null;
     }
 
     internal static string? ReadImagePath(SafeProcessHandle process)

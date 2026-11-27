@@ -29,6 +29,10 @@ var scenarios = new (string Name, Action Test)[]
     ("Concurrent telemetry aggregation", ConcurrentWrites),
     ("New heavy processes and files enter saturated tracking", AdmissionRanking),
     ("Per-disk history survives detachment and verified renumbering", InventoryHistory),
+    ("Session totals survive detail eviction and re-entry without a restart", SessionDetailEviction),
+    ("Confirmed exits and reused PIDs stay distinct in the program summary", SessionProcessLifetimes),
+    ("Session rows follow verified SSD identities across renumbering", SessionDiskIdentity),
+    ("Session ledger limits preserve the logical balance and disclose partial rows", SessionLedgerLimits),
     ("Bounded retained memory during long-running high-cardinality churn", BoundedMemory)
 };
 
@@ -268,6 +272,7 @@ static void EventLoss()
     var clean = core.Snapshot(loss.AddHours(1));
     Equal(31L, clean.LostEvents);
     Equal(true, clean.IsReliable);
+    Equal(true, clean.HasObservationGap);
 }
 
 static void ObservationGap()
@@ -391,8 +396,10 @@ static void AdmissionRanking()
     var admitted = core.Snapshot(at);
     Equal(active.Identity, Single(admitted.Processes).Process.Identity);
     Equal(50L, Single(admitted.Processes).Logical.Session.Bytes);
-    Equal(100L, admitted.Disks[0].UnattributedLogical.Session.Bytes);
+    Equal(0L, admitted.Disks[0].UnattributedLogical.Session.Bytes);
     Equal(2L, admitted.UntrackedProcesses);
+    Equal(new WriteTotals(150, 3), admitted.SessionLedger.Processes.Single(row => row.Process.Identity == active.Identity).Logical.Session);
+    CheckSessionBalance(admitted.SessionLedger);
 
     for (var index = 0; index < 3; index++)
         core.RecordFileWrite(new FileWrite(at, 0, active, repeated, 25));
@@ -442,6 +449,174 @@ static void InventoryHistory()
     Equal(0L, unknownReroute.Disks[0].Physical.Session.Bytes);
     Equal(999L, unknownReroute.Disks[1].Physical.Session.Bytes);
     True(unknownReroute.Disks[0].Disk.ObservationId != unknownReroute.Disks[1].Disk.ObservationId);
+}
+
+static void SessionDetailEviction()
+{
+    var core = Create(new GuardianOptions { MaxTrackedProcesses = 1 });
+    var at = Epoch();
+    var writer = GetProcess(15);
+    var rival = GetProcess(16);
+    const long mib = 1024L * 1024;
+
+    core.RecordFileWrite(new FileWrite(at, 0, writer, @"C:\first.log", 362 * mib));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), 0, rival, @"C:\second.log", mib));
+    var lostDetails = core.Snapshot(at.AddMinutes(2));
+    var retained = lostDetails.SessionLedger.Processes.Single(row => row.Process.Identity == writer.Identity);
+    Equal(false, retained.HasRollingDetails);
+    Equal(new WriteTotals(362 * mib, 1), retained.Logical.Session);
+    Equal(0L, lostDetails.UntrackedProcesses);
+    Equal(rival.Identity, Single(lostDetails.Processes).Process.Identity);
+
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(4), 0, writer, @"C:\first.log", 8 * mib));
+    var regained = core.Snapshot(at.AddMinutes(4));
+    var restored = regained.SessionLedger.Processes.Single(row => row.Process.Identity == writer.Identity);
+    Equal(new WriteTotals(370 * mib, 2), restored.Logical.Session);
+    Equal(new WriteTotals(8 * mib, 1), restored.Logical.Last10);
+    Equal(false, restored.IsPartial);
+    Equal(true, restored.HasRollingDetails);
+    Equal(true, restored.AreDetailsPartial);
+    Equal(new WriteTotals(371 * mib, 3), regained.SessionLedger.KnownLogical);
+    CheckSessionBalance(regained.SessionLedger);
+}
+
+static void SessionProcessLifetimes()
+{
+    var at = Epoch();
+    var core = Create();
+    var original = GetProcess(77);
+    var restarted = original with
+    {
+        Identity = original.Identity with { CreatedAt = at.AddMinutes(2) },
+        Path = @"\\?\c:\apps\writer.EXE"
+    };
+    var unknown = GetProcess(78) with { Path = null };
+
+    core.RecordFileWrite(new FileWrite(at, 0, original, @"C:\file.log", 13));
+    core.RecordFileWrite(new FileWrite(at, 2, original, @"E:\file.log", 17));
+    core.MarkProcessExited(original.Identity, at.AddMinutes(1));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(1).AddSeconds(1), 2, original, @"E:\file.log", 19));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), 0, restarted, @"C:\file.log", 23));
+    core.MarkProcessExited(restarted.Identity, at);
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), 0, unknown, @"C:\file.log", 29));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), 0, null, @"C:\file.log", 31));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), null, original, null, 37));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), 1, original, @"D:\file.log", 41));
+
+    var snapshot = core.Snapshot(at.AddMinutes(2));
+    var ledger = snapshot.SessionLedger;
+    Equal(new WriteTotals(132, 6), ledger.KnownLogical);
+    Equal(new WriteTotals(52, 2), ledger.ActiveLogical);
+    Equal(new WriteTotals(49, 3), ledger.ExitedLogical);
+    Equal(new WriteTotals(31, 1), ledger.UnidentifiedLogical);
+    Equal(new WriteTotals(29, 1), ledger.UnidentifiedProgramLogical);
+    Equal(new WriteTotals(37, 1), snapshot.UnmappedLogical);
+    var program = Single(ledger.Programs);
+    Equal(new WriteTotals(72, 4), program.Logical);
+    Equal(2, program.Instances);
+    Equal(1, program.ExitedInstances);
+    True(ledger.Processes.Where(row => row.Process.Identity == original.Identity).All(row => row.ExitTime == at.AddMinutes(1)));
+    Equal<DateTimeOffset?>(null, ledger.Processes.Single(row => row.Process.Identity == restarted.Identity).ExitTime);
+    CheckSessionBalance(ledger);
+
+    var lateFirstWrite = Create();
+    lateFirstWrite.MarkProcessExited(original.Identity, at.AddMinutes(1));
+    lateFirstWrite.RecordFileWrite(new FileWrite(at.AddMinutes(1), 0, original, @"C:\file.log", 43));
+    Equal(at.AddMinutes(1), Single(lateFirstWrite.Snapshot(at.AddMinutes(1)).SessionLedger.Processes).ExitTime);
+
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(3), 0, unknown with { Path = @"D:\Apps\Writer.exe" }, @"C:\file.log", 11));
+    var resolved = core.Snapshot(at.AddMinutes(3)).SessionLedger;
+    Equal(default, resolved.UnidentifiedProgramLogical);
+    Equal(new WriteTotals(40, 2), resolved.Programs.Single(row => row.Path == @"D:\Apps\Writer.exe").Logical);
+    Equal(2, resolved.Programs.Count);
+    CheckSessionBalance(resolved);
+}
+
+static void SessionDiskIdentity()
+{
+    var core = new MonitorEngine();
+    var at = Epoch();
+    var writer = GetProcess();
+    var original = new DiskInfo(0, "Example SSD", true, ["C:"]) { PersistentId = "original" };
+    core.SetInventory([original], at);
+    core.RecordFileWrite(new FileWrite(at, 0, writer, @"C:\file.log", 7));
+    var observation = Single(core.Snapshot(at).SessionLedger.Processes).DiskObservationId;
+
+    core.SetInventory([], at.AddMinutes(1));
+    var detached = Single(core.Snapshot(at.AddMinutes(1)).SessionLedger.Processes);
+    Equal(false, detached.IsDiskConnected);
+    Equal(new WriteTotals(7, 1), detached.Logical.Session);
+
+    core.SetInventory([original with { Number = 2 }, original with { PersistentId = "replacement" },
+        new DiskInfo(3, "Uncertain storage", false, []) { IsTypeKnown = false }], at.AddMinutes(2));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), 0, writer, @"D:\file.log", 11));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), 2, writer, @"C:\file.log", 13));
+    core.RecordFileWrite(new FileWrite(at.AddMinutes(2), 3, writer, @"X:\file.log", 19));
+    core.RecordDiskWrite(new DiskWrite(at.AddMinutes(2), 3, 23));
+    var coverage = core.Snapshot(at.AddMinutes(2));
+    Equal(new WriteTotals(19, 1), coverage.UnmappedLogical);
+    Equal(new WriteTotals(23, 1), coverage.UnmappedPhysical);
+    var snapshot = coverage.SessionLedger;
+    var rejoined = snapshot.Processes.Single(row => row.DiskObservationId == observation);
+    Equal(2, rejoined.DiskNumber);
+    Equal(true, rejoined.IsDiskConnected);
+    Equal(new WriteTotals(20, 2), rejoined.Logical.Session);
+    Equal(new WriteTotals(11, 1), snapshot.Processes.Single(row => row.DiskObservationId != observation).Logical.Session);
+    Equal(1, Single(snapshot.Programs).Instances);
+    CheckSessionBalance(snapshot);
+}
+
+static void SessionLedgerLimits()
+{
+    const int rows = 4096;
+    var core = Create(new GuardianOptions { MaxTrackedProcesses = 1 });
+    var at = Epoch();
+    var folded = GetProcess(rows + 1);
+
+    for (var pid = 1; pid <= rows; pid++)
+        core.RecordFileWrite(new FileWrite(at, 0, GetProcess(pid), @"C:\file.log", 2));
+    core.RecordFileWrite(new FileWrite(at.AddSeconds(1), 0, folded, @"C:\file.log", 7));
+
+    var saturated = core.Snapshot(at.AddSeconds(1)).SessionLedger;
+    Equal(rows, saturated.Processes.Count);
+    Equal(new WriteTotals(7, 1), saturated.OtherLogical);
+    Equal(new WriteTotals(2, 1), saturated.Processes.Single(row => row.Process.Identity.Pid == 1).Logical.Session);
+    CheckSessionBalance(saturated);
+
+    core.MarkProcessExited(GetProcess(2).Identity, at.AddSeconds(2));
+    Equal(new WriteTotals(2, 1), core.Snapshot(at.AddSeconds(2)).SessionLedger.ExitedLogical);
+    core.RecordFileWrite(new FileWrite(at.AddSeconds(3), 0, folded, @"C:\file.log", 13));
+
+    var compacted = core.Snapshot(at.AddSeconds(3)).SessionLedger;
+    Equal(rows, compacted.Processes.Count);
+    Equal(new WriteTotals(9, 2), compacted.OtherLogical);
+    var readmitted = compacted.Processes.Single(row => row.Process.Identity == folded.Identity);
+    Equal(new WriteTotals(13, 1), readmitted.Logical.Session);
+    Equal(true, readmitted.IsPartial);
+    Equal(true, Single(compacted.Programs).IsPartial);
+    Equal(new WriteTotals(2, 1), compacted.Processes.Single(row => row.Process.Identity.Pid == 1).Logical.Session);
+    CheckSessionBalance(compacted);
+
+    core.MarkProcessExited(GetProcess(3).Identity, at.AddSeconds(4));
+    var newer = GetProcess(rows + 2) with { Identity = new ProcessIdentity(rows + 2, at.AddSeconds(5)) };
+    core.RecordFileWrite(new FileWrite(at.AddSeconds(6), 0, newer, @"C:\file.log", 17));
+    var withNewer = core.Snapshot(at.AddSeconds(6)).SessionLedger;
+    var complete = withNewer.Processes.Single(row => row.Process.Identity == newer.Identity);
+    Equal(false, complete.IsPartial);
+    Equal(new WriteTotals(17, 1), complete.Logical.Session);
+    Equal(new WriteTotals(11, 3), withNewer.OtherLogical);
+    CheckSessionBalance(withNewer);
+}
+
+static void CheckSessionBalance(SessionLedgerSnapshot ledger)
+{
+    Equal(ledger.KnownLogical, new WriteTotals(
+        ledger.ActiveLogical.Bytes + ledger.ExitedLogical.Bytes + ledger.OtherLogical.Bytes + ledger.UnidentifiedLogical.Bytes,
+        ledger.ActiveLogical.Operations + ledger.ExitedLogical.Operations + ledger.OtherLogical.Operations + ledger.UnidentifiedLogical.Operations));
+    Equal(ledger.KnownLogical, new WriteTotals(
+        ledger.Programs.Sum(row => row.Logical.Bytes) + ledger.UnidentifiedProgramLogical.Bytes + ledger.OtherLogical.Bytes + ledger.UnidentifiedLogical.Bytes,
+        ledger.Programs.Sum(row => row.Logical.Operations) + ledger.UnidentifiedProgramLogical.Operations +
+        ledger.OtherLogical.Operations + ledger.UnidentifiedLogical.Operations));
 }
 
 static void BoundedMemory()

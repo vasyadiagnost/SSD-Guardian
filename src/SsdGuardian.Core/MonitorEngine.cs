@@ -8,6 +8,7 @@ public sealed class MonitorEngine
     private const int MaxExportedTerminationPathCharacters = 100_000;
     private static readonly TimeSpan SnoozeLength = TimeSpan.FromHours(1);
     private readonly object gate = new();
+    private readonly SessionLedger sessionLedger = new();
     private readonly Dictionary<int, TrackedDisk> disks = [];
     private readonly List<TrackedDisk> detachedDisks = [];
     private readonly Dictionary<ProcessDisk, TrackedProcess> processes = [];
@@ -152,14 +153,15 @@ public sealed class MonitorEngine
                 write.Process.Identity.CreatedAt == default || write.Process.Identity.CreatedAt > write.Timestamp)
             {
                 disk.Unattributed.Add(slot, write.Bytes);
+                sessionLedger.RecordUnidentified(write.Bytes);
                 return;
             }
 
+            sessionLedger.RecordProcess(write.Process, disk.Info, write.Timestamp, write.Bytes);
             var process = FindProcess(write.Process, diskNumber, slot, write.Bytes);
             if (process is null)
             {
                 untrackedProcesses = WriteTotals.SaturatingAdd(untrackedProcesses, 1);
-                disk.Unattributed.Add(slot, write.Bytes);
                 return;
             }
             process.Writes.Add(slot, write.Bytes);
@@ -194,6 +196,12 @@ public sealed class MonitorEngine
                     file.ObserveSize(slot, sample.Length);
             }
         }
+    }
+
+    public void MarkProcessExited(ProcessIdentity identity, DateTimeOffset exitedAt)
+    {
+        lock (gate)
+            sessionLedger.MarkExited(identity, exitedAt);
     }
 
     public void ReportLostEvents(long count, DateTimeOffset timestamp)
@@ -234,7 +242,11 @@ public sealed class MonitorEngine
                 .ToArray();
             return new MonitorSnapshot(now, diskRows, processRows, sessionPhysical, unmappedLogical, unmappedPhysical,
                 lostEvents, lastGap is null || now - lastGap.Value >= TimeSpan.FromHours(1),
-                anomalyCount, untrackedProcesses, untrackedFiles);
+                anomalyCount, untrackedProcesses, untrackedFiles)
+            {
+                HasObservationGap = lastGap is not null,
+                SessionLedger = sessionLedger.Snapshot(diskRows, processRows)
+            };
         }
     }
 

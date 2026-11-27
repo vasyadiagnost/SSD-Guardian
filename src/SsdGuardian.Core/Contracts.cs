@@ -48,6 +48,24 @@ public sealed record RecentTermination(ProcessIdentity Identity, string Path, Da
 public sealed record ProcessSnapshot(
     ProcessInfo Process, int DiskNumber, WriteWindows Logical, IReadOnlyList<FileSnapshot> Files);
 
+public sealed record ProcessSessionSnapshot(
+    ProcessInfo Process, int DiskNumber, long DiskObservationId, bool IsDiskConnected, DateTimeOffset? ExitTime,
+    bool IsPartial, WriteWindows Logical, bool HasRollingDetails, IReadOnlyList<FileSnapshot> Files)
+{
+    public bool AreDetailsPartial { get; init; }
+}
+
+public sealed record ProgramSessionSnapshot(
+    string Path, string Name, int Instances, int ExitedInstances, bool IsPartial, WriteTotals Logical);
+
+public sealed record SessionLedgerSnapshot(
+    WriteTotals KnownLogical, WriteTotals ActiveLogical, WriteTotals ExitedLogical, WriteTotals OtherLogical,
+    WriteTotals UnidentifiedLogical, WriteTotals UnidentifiedProgramLogical,
+    IReadOnlyList<ProcessSessionSnapshot> Processes, IReadOnlyList<ProgramSessionSnapshot> Programs)
+{
+    internal static readonly SessionLedgerSnapshot Empty = new(default, default, default, default, default, default, [], []);
+}
+
 public sealed record MonitorSnapshot(
     DateTimeOffset Timestamp,
     IReadOnlyList<DiskSnapshot> Disks,
@@ -59,7 +77,11 @@ public sealed record MonitorSnapshot(
     bool IsReliable,
     long AnomalyCount,
     long UntrackedProcesses,
-    long UntrackedFiles);
+    long UntrackedFiles)
+{
+    public bool HasObservationGap { get; init; }
+    public SessionLedgerSnapshot SessionLedger { get; init; } = SessionLedgerSnapshot.Empty;
+}
 
 public sealed record Anomaly(
     DateTimeOffset Timestamp,

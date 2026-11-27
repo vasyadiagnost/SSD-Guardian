@@ -12,7 +12,8 @@ internal sealed record SmokeReport(DateTimeOffset StartedAt, DateTimeOffset Ende
     int Samples, long FirstWorkingSetBytes, long LastWorkingSetBytes, long PeakWorkingSetBytes,
     long FirstPrivateBytes, long LastPrivateBytes, long PeakPrivateBytes, long WindowsPeakWorkingSetBytes,
     long ProfileWriteOperations, long ProfileWrittenBytes, bool Elevated, UiLanguage Language, string StatusText,
-    IReadOnlyList<SmokeStatus> Statuses, IReadOnlyList<SmokeCheckpoint> Checkpoints, MonitorSnapshot Snapshot);
+    IReadOnlyList<SmokeStatus> Statuses, IReadOnlyList<SmokeCheckpoint> Checkpoints,
+    int SessionProcessRows, int SessionProgramRows, MonitorSnapshot Snapshot);
 
 internal sealed class SmokeProbe : IDisposable
 {
@@ -81,11 +82,15 @@ internal sealed class SmokeProbe : IDisposable
         var seconds = elapsed.TotalSeconds;
         var cpuSeconds = (_process.TotalProcessorTime - _cpuAtStart).TotalSeconds;
         var corePercent = 100 * cpuSeconds / seconds;
+        var ledger = snapshot.SessionLedger;
+        // Keep diagnostic exports within the existing file size budget on long sessions.
+        var diagnosticSnapshot = snapshot with { SessionLedger = ledger with { Processes = [], Programs = [] } };
         return new SmokeReport(_startedAt, DateTimeOffset.UtcNow, seconds, cpuSeconds,
             corePercent / Environment.ProcessorCount, corePercent, Environment.ProcessorCount,
             _samples, _firstWorkingSet, _lastWorkingSet, _peakWorkingSet, _firstPrivate, _lastPrivate, _peakPrivate,
             _process.PeakWorkingSet64, _store.WriteOperations, _store.WrittenBytes, DiskWriteMonitor.IsElevated,
-            UiText.Language, status.GetMessage(UiText.Language), _statuses.ToArray(), _checkpoints.ToArray(), snapshot);
+            UiText.Language, status.GetMessage(UiText.Language), _statuses.ToArray(), _checkpoints.ToArray(),
+            ledger.Processes.Count, ledger.Programs.Count, diagnosticSnapshot);
     }
 
     private void AddCheckpoint(TimeSpan elapsed) =>

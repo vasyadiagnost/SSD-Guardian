@@ -76,6 +76,18 @@ internal sealed class BoundedMap<TKey, TValue>(int capacity, Action<TValue>? dis
             current.Value = (key, value);
     }
 
+    public void RemoveWhere(Func<TValue, bool> shouldRemove)
+    {
+        var current = age.First;
+        while (current is not null)
+        {
+            var next = current.Next;
+            if (shouldRemove(current.Value.Value) && TryRemove(current.Value.Key, out var removed))
+                discard?.Invoke(removed);
+            current = next;
+        }
+    }
+
     public void Clear()
     {
         if (discard is not null)
