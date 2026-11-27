@@ -1,4 +1,4 @@
-# SSD Guardian v0.1.3
+# SSD Guardian v0.1.4
 
 [Руководство на русском](README.ru.md)
 
@@ -6,7 +6,7 @@ SSD Guardian is a portable Windows 11 x64 utility that monitors physical writes 
 
 ## Start SSD Guardian
 
-1. Extract `SSD-Guardian-v0.1.3-win-x64.zip` to a new folder and run `SSDGuardian.exe` inside `SSD Guardian`. The archive includes the .NET runtime.
+1. Extract `SSD-Guardian-v0.1.4-win-x64.zip` to a new folder and run `SSDGuardian.exe` inside `SSD Guardian`. The archive includes the .NET runtime.
 2. Select **Run as administrator** and approve the Windows UAC prompt to enable ETW monitoring.
 3. Close the main window or minimize it to the tray to keep monitoring. Select **Exit** from the tray menu to stop monitoring.
 
@@ -20,7 +20,7 @@ Physical counters are per SSD. Logical counters show file requests by process an
 
 Each retained process instance keeps its session bytes and operations when recent-window or file details fall out of the tracking set. An exit marker appears when the process exit can be verified. The executable summary groups retained rows by verified full path and counts distinct process instances. Session summaries live in memory and start fresh when SSD Guardian restarts.
 
-Click any process column header to cycle through descending, ascending, and the default ordering by recent logical writes. An arrow marks the selected column and direction.
+Click any column header in **Processes** or **Executables** to cycle through descending, ascending, and the default order. An arrow marks the selected column and direction. Executables normally appear in descending order by session bytes. The three summary rows stay at the top.
 
 An anomaly needs a write threshold and evidence such as repeated writes with concurrent physical activity on the same SSD. Defaults are 1 GB over 30 minutes and 5 GB over 10 minutes. Alert details show the evidence, let you snooze alerts for an hour, and offer a confirmation step before terminating a process.
 

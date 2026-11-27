@@ -6,8 +6,8 @@ namespace SsdGuardian.App;
 
 internal sealed partial class MainForm
 {
-    private int? _processSortColumn;
-    private bool _processSortDescending;
+    private TableSort _processSort;
+    private TableSort _programSort;
     private MonitorSnapshot? _latestSnapshot;
     private ProcessRow[] _processRows = [];
     private ProgramRow[] _programRows = [];
@@ -99,10 +99,36 @@ internal sealed partial class MainForm
         ], tag => tag);
     }
 
-    private void UpdateProgramRows(SessionLedgerSnapshot ledger, bool hasSessionData)
+    private void ChangeProgramSort(int column)
     {
-        var known = ledger.Programs.OrderByDescending(row => row.Logical.Bytes)
-            .ThenBy(row => row.Path, StringComparer.OrdinalIgnoreCase).Select(row => new ProgramRow(row.Name, row.Logical, row));
+        _programSort = _programSort.Next(column);
+        SetProgramColumnText();
+        if (_latestSnapshot is { } snapshot)
+        {
+            UpdateProgramRows(snapshot.SessionLedger, HasSessionData(snapshot), preserveTop: false);
+        }
+    }
+
+    private void SetProgramColumnText() => SetSortedColumnText(_programTable, _programSort,
+        Get("Executable", "Программа"), Get("Session", "За сеанс"), Get("Operations", "Операций"), Get("Runs", "Запусков"),
+        Get("Ended runs", "Завершено"), Get("Executable path", "Путь к программе"));
+
+    private void UpdateProgramRows(SessionLedgerSnapshot ledger, bool hasSessionData, bool preserveTop = true)
+    {
+        var bySessionWrites = ledger.Programs.OrderByDescending(row => row.Logical.Bytes)
+            .ThenBy(row => row.Path, StringComparer.OrdinalIgnoreCase);
+        var textOrder = StringComparer.Create(Culture, ignoreCase: true);
+        var ordered = _programSort.Column switch
+        {
+            0 => _programSort.Order(bySessionWrites, row => row.Name, textOrder),
+            1 => _programSort.Order(bySessionWrites, row => row.Logical.Bytes),
+            2 => _programSort.Order(bySessionWrites, row => row.Logical.Operations),
+            3 => _programSort.Order(bySessionWrites, row => row.Instances),
+            4 => _programSort.Order(bySessionWrites, row => row.ExitedInstances),
+            5 => _programSort.Order(bySessionWrites, row => row.Path, textOrder),
+            _ => bySessionWrites
+        };
+        var known = ordered.Select(row => new ProgramRow(row.Name, row.Logical, row));
         ProgramRow OtherRow(string name, WriteTotals totals) => new(name, hasSessionData ? totals : null, null);
         ProgramRow[] coverage =
         [
@@ -112,25 +138,12 @@ internal sealed partial class MainForm
         ];
         var rows = coverage.Concat(known).ToArray();
         ReplaceVirtualRows(_programTable, ref _programRows, rows, row => row.Snapshot?.Path ?? row.Name,
-            comparer: StringComparer.OrdinalIgnoreCase);
+            preserveTop, StringComparer.OrdinalIgnoreCase);
     }
 
     private void ChangeProcessSort(int column)
     {
-        if (_processSortColumn != column)
-        {
-            _processSortColumn = column;
-            _processSortDescending = true;
-        }
-        else if (_processSortDescending)
-        {
-            _processSortDescending = false;
-        }
-        else
-        {
-            _processSortColumn = null;
-        }
-
+        _processSort = _processSort.Next(column);
         SetProcessColumnText();
         if (_latestSnapshot is { } snapshot)
         {
@@ -138,20 +151,19 @@ internal sealed partial class MainForm
         }
     }
 
-    private void SetProcessColumnText()
+    private void SetProcessColumnText() => SetSortedColumnText(_processTable, _processSort,
+        Get("Process", "Процесс"), "PID", "SSD", Get("Exit status", "Завершение"),
+        Get("10 min", "10 мин"), Get("30 min", "30 мин"), Get("60 min", "60 мин"),
+        Get("Session", "За сеанс"), Get("Operations", "Операций"), Get("Top file", "Основной файл"));
+
+    private static void SetSortedColumnText(ListView table, TableSort sort, params string[] captions)
     {
-        string[] captions =
-        [
-            Get("Process", "Процесс"), "PID", "SSD", Get("Exit status", "Завершение"),
-            Get("10 min", "10 мин"), Get("30 min", "30 мин"), Get("60 min", "60 мин"),
-            Get("Session", "За сеанс"), Get("Operations", "Операций"), Get("Top file", "Основной файл")
-        ];
-        if (_processSortColumn is int column)
+        if (sort.Column is int column)
         {
-            captions[column] += _processSortDescending ? " ↓" : " ↑";
+            captions[column] += sort.Descending ? " ↓" : " ↑";
         }
 
-        SetColumnText(_processTable, captions);
+        SetColumnText(table, captions);
     }
 
     private void UpdateProcessRows(IReadOnlyList<ProcessSessionSnapshot> snapshots, bool preserveTop = true)
@@ -162,31 +174,24 @@ internal sealed partial class MainForm
             .ThenByDescending(row => row.Snapshot.HasRollingDetails ? row.Snapshot.Logical.Last30.Bytes : 0)
             .ThenByDescending(row => row.Snapshot.Logical.Session.Bytes);
         var textOrder = StringComparer.Create(Culture, ignoreCase: true);
-        var ordered = _processSortColumn switch
+        var ordered = _processSort.Column switch
         {
-            0 => SortProcessRows(byRecentWrites, row => row.Snapshot.Process.Name, textOrder),
-            1 => SortProcessRows(byRecentWrites, row => row.Snapshot.Process.Identity.Pid),
-            2 => SortProcessRows(byRecentWrites, row => row.Snapshot.DiskNumber),
-            3 => SortProcessRows(byRecentWrites, row => DisplayText.ExitStatus(row.Snapshot.ExitTime), textOrder),
-            4 => SortProcessRows(byRecentWrites, row => row.Snapshot.Logical.Last10.Bytes, unavailable: MissingWindows),
-            5 => SortProcessRows(byRecentWrites, row => row.Snapshot.Logical.Last30.Bytes, unavailable: MissingWindows),
-            6 => SortProcessRows(byRecentWrites, row => row.Snapshot.Logical.Last60.Bytes, unavailable: MissingWindows),
-            7 => SortProcessRows(byRecentWrites, row => row.Snapshot.Logical.Session.Bytes),
-            8 => SortProcessRows(byRecentWrites, row => row.Snapshot.Logical.Session.Operations),
-            9 => SortProcessRows(byRecentWrites, row => row.TopFileName ?? "", textOrder, row => row.TopFileName is null),
+            0 => _processSort.Order(byRecentWrites, row => row.Snapshot.Process.Name, textOrder),
+            1 => _processSort.Order(byRecentWrites, row => row.Snapshot.Process.Identity.Pid),
+            2 => _processSort.Order(byRecentWrites, row => row.Snapshot.DiskNumber),
+            3 => _processSort.Order(byRecentWrites, row => DisplayText.ExitStatus(row.Snapshot.ExitTime), textOrder),
+            4 => _processSort.Order(byRecentWrites, row => row.Snapshot.Logical.Last10.Bytes, unavailable: MissingWindows),
+            5 => _processSort.Order(byRecentWrites, row => row.Snapshot.Logical.Last30.Bytes, unavailable: MissingWindows),
+            6 => _processSort.Order(byRecentWrites, row => row.Snapshot.Logical.Last60.Bytes, unavailable: MissingWindows),
+            7 => _processSort.Order(byRecentWrites, row => row.Snapshot.Logical.Session.Bytes),
+            8 => _processSort.Order(byRecentWrites, row => row.Snapshot.Logical.Session.Operations),
+            9 => _processSort.Order(byRecentWrites, row => row.TopFileName ?? "", textOrder, row => row.TopFileName is null),
             _ => byRecentWrites
         };
         ReplaceVirtualRows(_processTable, ref _processRows, ordered.ToArray(),
             row => (row.Snapshot.Process.Identity, row.Snapshot.DiskObservationId), preserveTop);
 
         static bool MissingWindows(ProcessRow row) => !row.Snapshot.HasRollingDetails;
-    }
-
-    private IEnumerable<ProcessRow> SortProcessRows<TKey>(IEnumerable<ProcessRow> rows,
-        Func<ProcessRow, TKey> value, IComparer<TKey>? comparer = null, Func<ProcessRow, bool>? unavailable = null)
-    {
-        var sorted = _processSortDescending ? rows.OrderByDescending(value, comparer) : rows.OrderBy(value, comparer);
-        return unavailable is null ? sorted : sorted.OrderBy(unavailable);
     }
 
     private static string? GetTopFileName(ProcessSessionSnapshot row)
@@ -367,4 +372,21 @@ internal sealed partial class MainForm
 
     private readonly record struct ProcessRow(ProcessSessionSnapshot Snapshot, string? TopFileName);
     private readonly record struct ProgramRow(string Name, WriteTotals? Totals, ProgramSessionSnapshot? Snapshot);
+
+    private readonly record struct TableSort(int? Column, bool Descending)
+    {
+        public TableSort Next(int clickedColumn) => (Column == clickedColumn, Descending) switch
+        {
+            (false, _) => new(clickedColumn, true),
+            (true, true) => new(clickedColumn, false),
+            _ => default
+        };
+
+        public IEnumerable<TRow> Order<TRow, TKey>(IEnumerable<TRow> rows, Func<TRow, TKey> value,
+            IComparer<TKey>? comparer = null, Func<TRow, bool>? unavailable = null)
+        {
+            var ordered = Descending ? rows.OrderByDescending(value, comparer) : rows.OrderBy(value, comparer);
+            return unavailable is null ? ordered : ordered.OrderBy(unavailable);
+        }
+    }
 }

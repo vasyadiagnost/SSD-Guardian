@@ -148,6 +148,8 @@ internal sealed partial class MainForm
         _programTable.Columns.Add("", 72, HorizontalAlignment.Right);
         _programTable.Columns.Add("", 110, HorizontalAlignment.Right);
         _programTable.Columns.Add("", 365);
+        _programTable.HeaderStyle = ColumnHeaderStyle.Clickable;
+        _programTable.ColumnClick += (_, e) => ChangeProgramSort(e.Column);
         _programTable.ShowItemToolTips = true;
         _programTable.DoubleClick += (_, _) => OpenSelectedProgram();
         _programTable.KeyDown += (_, e) => OpenOnEnter(e, OpenSelectedProgram);
@@ -206,6 +208,7 @@ internal sealed partial class MainForm
         _elevationButton.Text = Get("Run as administrator", "Запустить с правами администратора");
 
         SetProcessColumnText();
+        SetProgramColumnText();
         var process = Get("Process", "Процесс");
         var min10 = Get("10 min", "10 мин");
         var min30 = Get("30 min", "30 мин");
@@ -213,8 +216,6 @@ internal sealed partial class MainForm
         var session = Get("Session", "За сеанс");
         var operations = Get("Operations", "Операций");
         SetColumnText(_sessionTable, Get("Recorded writes", "Учтённая запись"), Get("Bytes", "Байт"), operations);
-        SetColumnText(_programTable, Get("Executable", "Программа"), session, operations, Get("Runs", "Запусков"),
-            Get("Ended runs", "Завершено"), Get("Executable path", "Путь к программе"));
         SetColumnText(_diskTable, Get("Disk", "Диск"), Get("Model", "Модель"), Get("Volumes", "Тома"),
             min10, min30, min60, session, operations);
         SetColumnText(_historyTable, Get("Detected", "Обнаружена"), process, "SSD",
